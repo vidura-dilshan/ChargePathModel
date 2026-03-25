@@ -1,0 +1,10 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+fastapi
+uvicorn
+pydantic
+pandas
+numpy
+torch
+googlemaps
+polyline
+openpyxl

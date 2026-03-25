@@ -1,0 +1,4 @@
+- [x] Install dependencies: pandas, numpy, torch, googlemaps, polyline, openpyxl
+- [x] Edit main.py to include all necessary imports, data loading, model loading, and function definitions
+- [x] Add POST endpoint /plan_route
+- [ ] Test the API by running it and making a request
