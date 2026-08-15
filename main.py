@@ -54,8 +54,8 @@ class CPUUnpickler(pickle.Unpickler):
 app = FastAPI()
 
 
-# GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-GOOGLE_MAPS_API_KEY = "AIzaSyALER_NJqGFdwseum4UGUk_wTTYZbGK-es"
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+# GOOGLE_MAPS_API_KEY = "AIzaSyALER_NJqGFdwseum4UGUk_wTTYZbGK-es"
 try:
     gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
     print("✅ Google Maps Client Initialized")
