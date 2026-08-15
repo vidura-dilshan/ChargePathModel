@@ -246,12 +246,32 @@ def compute_bearing(p1: torch.Tensor, p2: torch.Tensor) -> float:
     return float((torch.atan2(x, y) / math.pi + 1) / 2)
 
 
+def category_bonus(station_idx: int, required_category_ids) -> float:
+    """
+    Returns a score bonus [0.0 or 1.5] for stations whose nearby_category_id
+    matches any of the user's preferred category IDs.
+    0 in the list or None/empty = no preference (bonus 0 for all, no bias).
+    """
+    if not required_category_ids:
+        return 0.0
+    if isinstance(required_category_ids, (int, np.integer)):
+        if required_category_ids == 0:
+            return 0.0
+        required_category_ids = [required_category_ids]
+    if 0 in required_category_ids:
+        return 0.0
+    station_categories = df.iloc[station_idx]['nearby_category_id']
+    if any(cid in station_categories for cid in required_category_ids):
+        return 1.5
+    return 0.0
+
+
 def get_route_and_filter_stations(
     start_point: str,
     end_point: str,
     buffer_km: float = 5.0,
     required_connector: str = None,
-    required_category_ids=None
+    required_category_ids=None,
 ):
     directions = gmaps.directions(
         origin=start_point,
@@ -285,6 +305,7 @@ def get_route_and_filter_stations(
                 and is_category_compatible(i, required_category_ids)):
             valid_indices.append(i)
 
+    print(f"  🔍 {len(valid_indices)} stations pass all filters (buffer={buffer_km}km, connector={required_connector}, categories={required_category_ids})")
     return path_points, valid_indices, route_meta
 
 # ── 7. Single-Leg Planner (used by both outbound & return) ────────────────────
@@ -613,7 +634,7 @@ def plan_route(request: RouteRequest):
             start_point, end_point,
             buffer_km=5.0,
             required_connector=required_connector,
-            required_category_ids=required_category_ids
+            required_category_ids=required_category_ids,
         )
 
         # ── Early-exit: no route ──────────────────────────────────────────
