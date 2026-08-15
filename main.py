@@ -1,6 +1,7 @@
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import Optional, List
 import pandas as pd
 import numpy as np
 import torch
@@ -53,8 +54,8 @@ class CPUUnpickler(pickle.Unpickler):
 app = FastAPI()
 
 
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-# GOOGLE_MAPS_API_KEY = "AIzaSyALER_NJqGFdwseum4UGUk_wTTYZbGK-es"
+# GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+GOOGLE_MAPS_API_KEY = "AIzaSyALER_NJqGFdwseum4UGUk_wTTYZbGK-es"
 try:
     gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
     print("✅ Google Maps Client Initialized")
@@ -62,14 +63,15 @@ except Exception as e:
     print(f"❌ Google Maps Error: {e}")
 
 # ── 4. Load & Preprocess Station Data ────────────────────────────────────────
-FILE_ID = "17T4kgzEm5c22SotFISscbY7QvFSbzsHb"
+FILE_ID = "1Ac7XvJoYfhDB0mt0LoU1_TQXRz7wbdMo"
 URL     = f"https://drive.google.com/uc?export=download&id={FILE_ID}"
 
 EXPECTED_COLUMNS = [
     'station_id', 'station_name', 'latitude', 'longitude',
     'fast_charging', 'available_plugs', 'charging_power',
     'cost_per_kw', 'average_waiting_time', 'charging_duration',
-    'status', 'connector_slots', 'supported_connector_types'
+    'status', 'connector_slots', 'supported_connector_types',
+    'nearby_category', 'nearby_amenity_description', 'nearby_category_id'
 ]
 
 print("📦 Loading station data...")
@@ -102,6 +104,36 @@ try:
         lambda x: [t.strip() for t in x.split(',')] if x.lower() != 'nan' else []
     )
 
+    # --- station_id (unique identifier) ---
+    if 'station_id' not in df.columns:
+        df['station_id'] = [f"CS{idx+1:03d}" for idx in range(len(df))]
+    else:
+        df['station_id'] = df['station_id'].astype(str)
+
+    # --- nearby-amenity fields ---
+    df['nearby_category'] = df['nearby_category'].fillna('Unknown').astype(str).str.strip() \
+        if 'nearby_category' in df.columns else 'Unknown'
+    df['nearby_amenity_description'] = df['nearby_amenity_description'].fillna('').astype(str).str.strip() \
+        if 'nearby_amenity_description' in df.columns else ''
+
+    def parse_id_list(value):
+        """Scalar or comma-separated ids -> list[int]. Skips blank/invalid tokens."""
+        ids = []
+        for token in str(value).split(','):
+            token = token.strip()
+            if not token or token.lower() == 'nan':
+                continue
+            try:
+                ids.append(int(float(token)))
+            except ValueError:
+                continue
+        return ids
+
+    if 'nearby_category_id' in df.columns:
+        df['nearby_category_id'] = df['nearby_category_id'].apply(parse_id_list)
+    else:
+        df['nearby_category_id'] = [[] for _ in range(len(df))]
+
     # Normalised columns required by quality scorer
     df['norm_power'] = df['charging_power']       / df['charging_power'].max()
     df['norm_cost']  = 1.0 - (df['cost_per_kw']  / df['cost_per_kw'].max())
@@ -111,7 +143,9 @@ try:
     STATION_LOCATIONS = torch.tensor(
         df[['latitude', 'longitude']].values, dtype=torch.float32
     )
+    all_category_ids = sorted(set(cid for lst in df['nearby_category_id'] for cid in lst))
     print(f"✅ {len(df)} active stations loaded.")
+    print(f"   Nearby category IDs found: {all_category_ids}")
 
 except Exception as e:
     print(f"❌ Data load error: {e}")
@@ -174,6 +208,25 @@ def is_connector_compatible(station_idx: int, required_connector: str) -> bool:
     return any(required_connector.strip().lower() == s.lower() for s in supported)
 
 
+def is_category_compatible(station_idx: int, required_category_ids) -> bool:
+    """
+    Returns True if no category filter is given, or if the station's nearby_category_id
+    list intersects with required_category_ids.
+    required_category_ids: None, a single int, or a list/tuple of ints — multiple ids = OR match.
+    A value of 0 (or a list containing 0) means "no filter" — all stations pass.
+    """
+    if not required_category_ids:
+        return True
+    if isinstance(required_category_ids, (int, np.integer)):
+        if required_category_ids == 0:
+            return True
+        required_category_ids = [required_category_ids]
+    if 0 in required_category_ids:
+        return True
+    station_categories = df.iloc[station_idx]['nearby_category_id']
+    return any(cid in station_categories for cid in required_category_ids)
+
+
 def station_quality_score(station_idx: int) -> float:
     row = df.iloc[station_idx]
     return float(
@@ -197,7 +250,8 @@ def get_route_and_filter_stations(
     start_point: str,
     end_point: str,
     buffer_km: float = 5.0,
-    required_connector: str = None
+    required_connector: str = None,
+    required_category_ids=None
 ):
     directions = gmaps.directions(
         origin=start_point,
@@ -226,7 +280,9 @@ def get_route_and_filter_stations(
     for i in range(len(df)):
         station_rep = station_locs[i].unsqueeze(0).expand(len(path_tensor), -1)
         min_dist    = vectorized_haversine(path_tensor, station_rep).min().item()
-        if min_dist <= buffer_km and is_connector_compatible(i, required_connector):
+        if (min_dist <= buffer_km
+                and is_connector_compatible(i, required_connector)
+                and is_category_compatible(i, required_category_ids)):
             valid_indices.append(i)
 
     return path_points, valid_indices, route_meta
@@ -530,6 +586,7 @@ class RouteRequest(BaseModel):
     current_battery_pct:  float
     required_connector:   str  = "Type 2"
     return_trip:          int  = 0          # 0 = one-way, 1 = round-trip
+    nearby_category_ids:  Optional[List[int]] = None  # e.g. [2, 4] — null = no filter
 
 # ── 9. /plan_route endpoint ──────────────────────────────────────────────────
 @app.post("/plan_route")
@@ -543,18 +600,20 @@ def plan_route(request: RouteRequest):
     if df.empty:
         raise HTTPException(status_code=500, detail="Station data not loaded")
 
-    start_point         = request.start_point
-    end_point           = request.end_point
-    max_range_km        = request.max_range_km
-    current_battery_pct = request.current_battery_pct
-    required_connector  = request.required_connector
-    return_trip         = request.return_trip          # 0 or 1
+    start_point           = request.start_point
+    end_point             = request.end_point
+    max_range_km          = request.max_range_km
+    current_battery_pct   = request.current_battery_pct
+    required_connector    = request.required_connector
+    return_trip           = request.return_trip          # 0 or 1
+    required_category_ids = request.nearby_category_ids  # None or list[int]
 
     try:
         route_points, valid_station_indices, route_meta = get_route_and_filter_stations(
             start_point, end_point,
             buffer_km=5.0,
-            required_connector=required_connector
+            required_connector=required_connector,
+            required_category_ids=required_category_ids
         )
 
         # ── Early-exit: no route ──────────────────────────────────────────
